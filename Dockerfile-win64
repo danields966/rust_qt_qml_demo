@@ -1,0 +1,79 @@
+### STAGE 1: Build static Qt for Windows
+FROM ubuntu:22.04 AS qt-build
+
+ARG JOBS=4
+# Use multiple parallel jobs for make
+ENV MAKEFLAGS="-j${JOBS}"
+
+# Install build dependencies and MinGW-w64 cross-toolchain
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        build-essential git curl wget cmake unzip xz-utils \
+        ca-certificates python3 perl pkg-config \
+        mesa-common-dev mesa-utils libegl1-mesa-dev libgles2-mesa-dev libssl-dev libx11-dev libxcb1-dev \
+        libxext-dev libxrender-dev libfontconfig1-dev libfreetype6-dev libx11-xcb-dev \
+        mingw-w64 mingw-w64-tools gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+        binutils-mingw-w64-x86-64 && \
+    # Configure MinGW-w64 to use POSIX threading
+    update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix && \
+    update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy EGL headers into the MinGW sysroot so Qt can find them when cross-compiling
+ARG SYSROOT=/usr/x86_64-w64-mingw32
+RUN mkdir -p ${SYSROOT}/include/EGL && \
+    cp -r /usr/include/EGL/* ${SYSROOT}/include/EGL/
+
+# Download and extract Qt sources
+WORKDIR /qt-src
+COPY qt-everywhere-opensource-src-5.15.17.tar.xz /tmp/
+RUN tar -xJf /tmp/qt-everywhere-opensource-src-5.15.17.tar.xz && \
+    mv qt-everywhere-src-5.15.17 qt5-src && \
+    rm /tmp/qt-everywhere-opensource-src-5.15.17.tar.xz
+
+WORKDIR /qt-src/qt5-src
+
+# Remove modules not needed for this application, keep only core, network, and essential subsystems
+RUN rm -rf qtwebengine qtwayland qtactiveqt
+
+# Configure and build Qt with static linking
+RUN mkdir build-static && cd build-static && \
+    ../configure \
+        -prefix /opt/qt5-static \
+        -static \
+        -static-runtime \
+        -release \
+        -opensource \
+        -confirm-license \
+        -xplatform win32-g++ \
+        -nomake examples \
+        -nomake tests \
+        -nomake tools \
+        -no-egl \
+        -no-d3d12 \
+        -device-option CROSS_COMPILE=x86_64-w64-mingw32- \
+        -device-option SYSROOT=${SYSROOT} && \
+    make -j${JOBS} && \
+    make install
+
+### STAGE 2: Build Rust application
+FROM qt-build AS rust-build
+
+# Install Rust toolchain and add Windows GNU target
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    ~/.cargo/bin/rustup default stable && \
+    ~/.cargo/bin/rustup target add x86_64-pc-windows-gnu
+
+# Update PATH to include Cargo and Qt binaries
+ENV PATH="/root/.cargo/bin:/opt/qt5-static/bin:${PATH}"
+
+WORKDIR /app
+COPY . .
+
+# Compile the application for Windows target
+RUN cargo build --release --target x86_64-pc-windows-gnu
+
+### STAGE 3: Export the built executable
+FROM scratch AS export
+# Copy the compiled .exe from the Rust build stage
+COPY --from=rust-build /app/target/x86_64-pc-windows-gnu/release/*.exe /
