@@ -47,7 +47,19 @@ After running this, you will find the Windows executable in the bin/ directory:
 bin/rust_qt_qml_demo.exe
 ```
 
-### 2. Native Linux build (optional)
+### 2. Build for Linux (x86_64)
+
+```
+make linux64
+```
+
+After running this, you will find the Linux executable in the bin/ directory:
+
+```
+bin/rust_qt_qml_demo
+```
+
+### 3. Native Linux build (optional)
 
 To run or iterate on the Rust/QML code on Linux, you can build and run natively:
 

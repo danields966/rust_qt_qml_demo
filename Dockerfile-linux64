@@ -1,0 +1,88 @@
+### STAGE 1: Build static Qt for Linux
+FROM ubuntu:22.04 AS qt-build
+
+ARG JOBS=4
+ENV MAKEFLAGS="-j${JOBS}"
+
+# Install build dependencies for Qt
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        build-essential git curl wget cmake unzip xz-utils \
+        ca-certificates python3 perl pkg-config \
+        libxcb1-dev libx11-xcb-dev libx11-dev libxcb-xinerama0-dev libxcb-icccm4-dev \
+        libxcb-image0-dev libxcb-keysyms1-dev libxcb-render-util0-dev \
+        libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+        libegl1-mesa-dev libgles2-mesa-dev libglu1-mesa-dev libgl1-mesa-dev \
+        libssl-dev libfontconfig1-dev libfreetype6-dev libpng-dev libjpeg-dev libpcre3-dev zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Download and extract Qt sources
+WORKDIR /qt-src
+COPY qt-everywhere-opensource-src-5.15.17.tar.xz /tmp/
+RUN tar -xJf /tmp/qt-everywhere-opensource-src-5.15.17.tar.xz && \
+    mv qt-everywhere-src-5.15.17 qt5-src && \
+    rm /tmp/qt-everywhere-opensource-src-5.15.17.tar.xz
+
+WORKDIR /qt-src/qt5-src
+
+# Remove modules not needed
+RUN rm -rf qtwebengine qtwayland
+
+# Configure and build Qt statically with essential modules
+RUN mkdir build-static && cd build-static && \
+    ../configure \
+        -prefix /opt/qt5-static \
+        -static \
+        -release \
+        -opensource \
+        -confirm-license \
+        -pkg-config \
+        -nomake examples \
+        -nomake tests \
+        -nomake tools \
+        -qt-zlib \
+        -qt-pcre \
+        -qt-libpng \
+        -qt-libjpeg \
+        -qt-freetype && \
+    make -j${JOBS} && \
+    make install
+
+### STAGE 2: Build Rust application
+FROM qt-build AS rust-build
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    ~/.cargo/bin/rustup default stable
+
+# Add Cargo and Qt binaries to PATH
+ENV PATH="/root/.cargo/bin:/opt/qt5-static/bin:${PATH}"
+
+WORKDIR /app
+# Copy manifest and source to ensure targets exist
+COPY Cargo.toml ./
+COPY src/ src
+# Fetch dependencies (requires src/main.rs present to locate targets)
+RUN cargo fetch
+
+# Copy QML and build script
+COPY qml/ ./qml
+COPY build.rs ./build.rs
+
+# Build the application
+RUN cargo build --release
+
+### STAGE 3: Runtime image
+FROM ubuntu:22.04 AS runtime
+
+# Install minimal Qt runtime libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxcb1 libx11-6 libx11-xcb1 libegl1-mesa libgles2-mesa libgl1-mesa-glx && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# Copy the built binary and QML assets
+COPY --from=rust-build /app/target/release/rust_qt_qml_demo ./rust_qt_qml_demo
+COPY --from=rust-build /app/qml ./qml
+
+ENTRYPOINT ["./rust_qt_qml_demo"]
